@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/agent-guard.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

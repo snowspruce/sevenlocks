@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# pre-push 守卫（2026-10-22）：挡住"基于陈旧基线推送"和"改写共享分支历史"。
+#
+# 为什么需要它：session-wt.sh push 会先 rebase 再推，但**手动 git push 会绕过脚本**。
+# 2026-10-22 事故形态就是一个落后 178 提交的 checkout 被当成当前状态使用。
+# 本钩子在推送前 fetch 目标分支，落后就直接拒绝，并给出 rebase 指令。
+#
+# 保护范围（可覆盖）：PREPUSH_PROTECTED="kewang main"
+# 逃生舱：SKIP_PREPUSH_CHECK=1 git push ...（或在 git push --no-verify）
+# sevenlocks-managed
+#
+# 两道检查：
+#   ① 落后拒绝：本地提交缺少目标分支上的新提交 → 必须先 rebase
+#   ② 非快进拒绝：推送会丢弃远端已有提交（force push 改写共享历史）
+#      注：历史改写通常先被①拦住（旧提交仍留在远端 = 本地"落后"），②是竞态兜底
+set -uo pipefail
+
+remote="${1:-origin}"
+zero="0000000000000000000000000000000000000000"
+PROTECTED="${PREPUSH_PROTECTED:-kewang main}"
+
+# stdin 是 git 传入的 ref 列表：先缓存到临时文件。否则主检查的 `while read` 会把它读空，
+# 链式调用的 .local（git-lfs/自定义扫描）拿到 0 行——「保留钩子」变成静默阉割。
+_input=$(mktemp "${TMPDIR:-/tmp}/pre-push-refs.XXXXXX") || exit 1
+trap 'rm -f "$_input"' EXIT
+cat > "$_input"
+
+if [ "${SKIP_PREPUSH_CHECK:-0}" = "1" ]; then
+    echo "pre-push: ⚠️  SKIP_PREPUSH_CHECK=1，跳过落后/非快进检查（自担风险）" >&2
+    # 逃生舱只跳过**本仓检查**；本机既有 .local（git-lfs/密钥扫描）仍必须执行并拿到 refs
+    if [ -x "$(dirname "$0")/pre-push.local" ]; then
+        "$(dirname "$0")/pre-push.local" "$@" < "$_input"
+        exit $?
+    fi
+    exit 0
+fi
+
+fail=0
+
+while read -r lref lsha rref rsha; do
+    [ -n "${rref:-}" ] || continue
+    case "$rref" in
+        refs/heads/*) ;;
+        *) continue ;;   # tag / notes 不管
+    esac
+
+    branch="${rref#refs/heads/}"
+    protected=0
+    for p in $PROTECTED; do
+        [ "$branch" = "$p" ] && protected=1 && break
+    done
+
+    if [ "$lsha" = "$zero" ]; then
+        # 删除分支：受保护分支必须显式绕过（原实现直接 continue，实测可删 kewang）
+        if [ "$protected" = "1" ]; then
+            echo "" >&2
+            echo "pre-push: ❌ 拒绝删除受保护分支 ${remote}/${branch}（PREPUSH_PROTECTED 内）" >&2
+            echo "pre-push:    确需删除：SKIP_PREPUSH_CHECK=1 git push ${remote} --delete ${branch}" >&2
+            echo "" >&2
+            fail=1
+        fi
+        continue
+    fi
+
+    [ "$protected" = "1" ] || continue
+
+    # 新分支（远端还不存在）没有"落后"可比，放行
+    if [ "$rsha" = "$zero" ]; then
+        continue
+    fi
+
+    if ! git fetch --quiet "$remote" "+refs/heads/${branch}:refs/remotes/${remote}/${branch}" 2>/dev/null; then
+        # 拉取失败=无法判定是否落后。这里选择放行并告警：推送本身也需要网络，
+        # 网络真断时 git 自己会失败；不该让钩子成为"离线不能推"的新故障点。
+        echo "pre-push: ⚠️  无法 fetch ${remote}/${branch}，跳过落后检查（网络问题？）" >&2
+        continue
+    fi
+
+    behind=$(git rev-list --count "${lsha}..refs/remotes/${remote}/${branch}" 2>/dev/null || echo 0)
+    if [ "${behind:-0}" -gt 0 ]; then
+        echo "" >&2
+        echo "pre-push: ❌ 拒绝推送：本地落后 ${remote}/${branch} ${behind} 个提交" >&2
+        echo "pre-push:    基于陈旧基线的提交会覆盖别人的改动。先对齐再推：" >&2
+        echo "pre-push:      git fetch ${remote} ${branch}" >&2
+        echo "pre-push:      git rebase ${remote}/${branch}" >&2
+        echo "pre-push:    （session-wt.sh push 已内置这两步，走脚本可避免）" >&2
+        echo "pre-push:    紧急逃生舱：SKIP_PREPUSH_CHECK=1 git push ..." >&2
+        echo "" >&2
+        fail=1
+        continue
+    fi
+
+    if [ "$rsha" != "$zero" ] && ! git merge-base --is-ancestor "$rsha" "$lsha" 2>/dev/null; then
+        echo "" >&2
+        echo "pre-push: ❌ 拒绝非快进推送：会丢弃 ${remote}/${branch} 上的已有提交（改写共享历史）" >&2
+        echo "pre-push:    正常流程是先 rebase 再推（session-wt.sh push）；确需改写请显式：" >&2
+        echo "pre-push:      SKIP_PREPUSH_CHECK=1 git push --force-with-lease ..." >&2
+        echo "" >&2
+        fail=1
+    fi
+done < "$_input"
+
+# 链式调用安装前的本机 pre-push（install-git-hooks.sh 保留为 pre-push.local）——
+# 必须回放同一份 ref 列表，否则读取 stdin 的钩子（git-lfs 等）拿到 EOF 静默失效。
+if [ "$fail" -eq 0 ] && [ -x "$(dirname "$0")/pre-push.local" ]; then
+    "$(dirname "$0")/pre-push.local" "$@" < "$_input"
+    exit $?
+fi
+
+exit "$fail"

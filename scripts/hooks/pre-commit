@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# pre-commit 守卫（2026-10-22）：主 checkout（hub）禁止提交——L1 从规约变硬拦。
+#
+# 为什么需要它：2026-10-22 实测主 checkout 长期被当编辑区用（54 个已跟踪脏文件、
+# 12 领先/187 落后、另一会话仍在写）。「主 checkout 只作 hub」此前只是约定，靠人
+# 记得；本钩子把「在 hub 提交」变成提交前失败。判据 = git-dir 与 git-common-dir
+# 相同 ⇒ 当前是主 checkout（链接 worktree 的 git-dir 在 common/worktrees/ 下）。
+#
+# 不覆盖本机既有钩子：install-git-hooks.sh 会把原有的 pre-commit 保留为
+# pre-commit.local，本钩子放行时链式调用它（例如 macOS 元数据文件守卫）。
+#
+# 逃生舱：SL_ALLOW_HUB_COMMIT=1 git commit …（收口/rebase 等一次性场景）
+# sevenlocks-managed
+set -uo pipefail
+
+HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# 链式调用安装前的本机钩子（存在才跑）；返回它的退出码
+chain_local() {
+    if [ -x "$HOOKS_DIR/pre-commit.local" ]; then
+        "$HOOKS_DIR/pre-commit.local" "$@"
+    fi
+}
+
+if [ "${SL_ALLOW_HUB_COMMIT:-0}" = "1" ]; then
+    echo "pre-commit: ⚠️  SL_ALLOW_HUB_COMMIT=1，跳过 hub 守卫（自担风险）" >&2
+    chain_local "$@"
+    exit $?
+fi
+
+_gitdir=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) || { chain_local "$@"; exit $?; }
+_common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { chain_local "$@"; exit $?; }
+
+# 链接 worktree → 放行（正常编码路径）
+if [ "$_gitdir" != "$_common" ]; then
+    chain_local "$@"
+    exit $?
+fi
+
+_branch=$(git symbolic-ref --short -q HEAD 2>/dev/null || echo "(detached)")
+_toplevel=$(git rev-parse --show-toplevel 2>/dev/null || echo "?")
+
+# 主 checkout 的脚本可能落后（hub 未收口）：没有 adopt 时给「先 start 再进 worktree」的回退，
+# 否则会话照文案执行第一步就失败（2026-10-23 审查 P0 实证）
+if grep -q 'cmd_adopt()' "${_toplevel}/scripts/session-wt.sh" 2>/dev/null; then
+    _adopt_hint="   ./scripts/session-wt.sh adopt <name> -- <你的路径…>
+   cd /tmp/wt-<name> && git add -- <你的路径…> && git commit -m …
+   ./scripts/session-wt.sh push <name>"
+else
+    _adopt_hint="   # 主 checkout 的 session-wt 是旧版（无 adopt）：先建 worktree，再用新脚本
+   ./scripts/session-wt.sh start <name>
+   cd /tmp/wt-<name> && ./scripts/session-wt.sh adopt <name> -- <你的路径…>
+   git add -- <你的路径…> && git commit -m … && ./scripts/session-wt.sh push <name>"
+fi
+
+cat >&2 <<EOF
+
+❌ 拒绝提交：主 checkout（hub）不是编码区——L1 规定编码一律在会话 worktree
+
+   当前分支: ${_branch}
+   hub 路径: ${_toplevel}
+
+正确姿势（一键把属于你的 paths 搬进 worktree，主 checkout 原样保留）：
+${_adopt_hint}
+   # 部署读 origin/<开发分支>，与主 checkout 的未提交改动无关；不要把别人的改动一起提交
+
+紧急放行（收口/rebase 等，自担风险）：
+   SL_ALLOW_HUB_COMMIT=1 git commit …
+
+EOF
+exit 1

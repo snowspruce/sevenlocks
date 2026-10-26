@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# pre-merge-commit 守卫（2026-10-22）：`git merge` 产生的提交不走 pre-commit——
+# 主 checkout 上 `git merge --no-ff` 实测可绕过 hub 守卫直接落提交。这里复用同一判据。
+#
+# 两道：① 本仓 hub 守卫（复用 pre-commit）；② 链式调用安装前的本机 pre-merge-commit.local
+# （安装器会把既有同名钩子保留为 .local；pre-commit/pre-push 都做了链式，这里不能漏——
+# 2026-10-23 审查 P1 实证原 wrapper 让本机钩子静默失效）。
+# sevenlocks-managed
+set -uo pipefail
+HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if ! "$HOOKS_DIR/pre-commit" "$@"; then
+    echo "pre-merge-commit: 合并提交被拒。若在主 checkout 触发：本次 merge 已写入工作区，" >&2
+    echo "                  先 git merge --abort，再到会话 worktree 里重做（adopt 可搬改动）" >&2
+    exit 1
+fi
+
+if [ -x "$HOOKS_DIR/pre-merge-commit.local" ]; then
+    "$HOOKS_DIR/pre-merge-commit.local" "$@"
+    exit $?
+fi
+exit 0

@@ -1,0 +1,85 @@
+# sevenlocks-v1.18 · CI workflow 模板（L4 层）
+# 上游真源：上游项目 .github/workflows/ci.yml ——骨架（changes job + concurrency + 门禁语义）
+# 升级照 diff 同步；执行 job 是定制，按项目填。
+# 设计要点（勿破坏）：
+# - 路径过滤在 job 级（changes job + needs/if），**不用 workflow 级 on.push.paths**——
+#   无关提交整个不触发 → 部署门禁查无 run 被自己拦死；skipped job 的 run 结论=success。
+# - concurrency cancel:false：同 ref 的 pending run 自动淘汰（cancelled≠失败，是「被新
+#   push 覆盖」）；false 保证长 run 不被高频 push 打断。
+# - 镜像分支（若有）不在 push 触发列表——镜像提交在开发分支已有 run，push 触发镜像
+#   分支会原样重跑一遍纯浪费（自动化首日实测）。
+# - self-hosted runner 注意：launchd/systemd 启动无 shell profile，工具链 PATH 写进
+#   runner 的 .env；多实例 .env 必须同步改；runner 永不与生产同机（OOM 实录）。
+
+name: CI
+
+on:
+  push:
+    branches: [<DEV_BRANCH>]        # 例：kewang；镜像分支（main）勿加
+  pull_request:
+    branches: [<MIRROR_OR_DEFAULT>] # 例：main（PR 基分支）
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 变更检测：git diff push.before..sha 目录命中 → 各 job 的 if。兜底全跑 =
+  # 非 push 事件（dispatch/rerun）/基线缺失/强推/改本文件自身（宁多跑不漏测）。
+  changes:
+    name: 变更检测
+    runs-on: <RUNNER>                # ubuntu-latest 或 self-hosted
+    outputs:
+      job_a: ${{ steps.f.outputs.job_a }}
+      # job_b: ...（按项目扩展）
+    steps:
+      - uses: actions/checkout@v4
+      - name: 计算各 job 的目录命中
+        id: f
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -e
+          ALL="job_a"               # 全量兜底时全部置 true 的清单（与 outputs 对齐）
+          full_run() { for k in $ALL; do echo "$k=true" >> "$GITHUB_OUTPUT"; done; exit 0; }
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then full_run; fi
+          git fetch --depth=1 origin "$BEFORE" 2>/dev/null || full_run
+          if ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then full_run; fi
+          FILES=$(git diff --name-only "$BEFORE" "$GITHUB_SHA" || true)
+          [ -n "$FILES" ] || full_run
+          echo "$FILES" | grep -qE '^\.github/workflows/' && full_run   # 改 CI 自身全跑
+          hit() { echo "$FILES" | grep -qE "$1" && echo true || echo false; }
+          {
+            echo "job_a=$(hit '^src_a/')"   # 定制内容：目录正则 → job 映射，按项目扩展
+          } >> "$GITHUB_OUTPUT"
+
+  job-a:
+    needs: changes
+    if: needs.changes.outputs.job_a == 'true'
+    name: <job 名 · 测试类型>
+    runs-on: <RUNNER>
+    steps:
+      - uses: actions/checkout@v4
+      - run: <测试命令>               # 定制内容：测试本身
+      # 大依赖提速（self-hosted 且 npm 级依赖才值得）：本机文件系统缓存替代
+      # actions/cache（后者占 GitHub 计费存储，Free 500MB 很快爆）——完整实现见
+      # SEVEN_LOCKS.md L4（lockfile+manifest+工具链版本三合一键 / mkdir 抢占 /
+      # cp -c 或 reflink 克隆 / 残骸自愈），此处不内联以防骨架腐化。
+
+  # 可选：shell-lint（有 bash 部署链就加——3000 行 bash 命脉零静态检查是裸奔）
+  shell-lint:
+    needs: changes
+    if: needs.changes.outputs.<scripts 输出键> == 'true'
+    name: shell · shellcheck
+    runs-on: <RUNNER>
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          SC="$(command -v shellcheck || echo /opt/homebrew/bin/shellcheck)"
+          [ -x "$SC" ] || { echo "::error::shellcheck 未安装"; exit 1; }
+          "$SC" --severity=error scripts/*.sh   # 只闸 error 级，warning 不进闸防历史噪音
+      # v1.18 起建议随包启用（先把模板的 scripts/tests/ 拷进项目；分支名非 kewang/main 见注释）：
+      # - run: bash scripts/verify-install.sh            # 通用层机制自检（v1.18：31 PASS/0 FAIL/3 SKIP）
+      # - run: bash scripts/tests/test_agent_guard.sh    # 编辑时拦截：hub 拒绝/worktree 放行/fail-open
+      # - run: bash scripts/tests/test_conflicts.sh      # 冲突雷达：交集/无交集/读取失败披露
+      #   env: { SL_TEST_DEV: <开发分支>, SL_TEST_MIRROR: <镜像分支> }

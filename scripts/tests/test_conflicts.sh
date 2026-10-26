@@ -18,9 +18,13 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SW="${SL_TEST_SW:-$REPO_ROOT/scripts/session-wt.sh}"   # SL_TEST_SW=变异副本（自证测试有效）
-# 分支名跟被测脚本的参数层保持一致（模板项目把 SL_DEV_BRANCH 改成 dev 时，测试要跟着传）
-DEV="${SL_TEST_DEV:-kewang}"
-MIRROR="${SL_TEST_MIRROR:-main}"
+# 分支名自动读被测脚本的参数层（项目把 SL_DEV_BRANCH 改成 dev 也无需传参）；
+# SL_TEST_DEV / SL_TEST_MIRROR 可显式覆盖。
+_parse_param() { sed -n "s/^$1=\"\([^\"]*\)\".*/\1/p" "$SW" 2>/dev/null | head -1; }
+DEV="${SL_TEST_DEV:-$(_parse_param SL_DEV_BRANCH)}"
+DEV="${DEV:-kewang}"
+MIRROR="${SL_TEST_MIRROR:-$(_parse_param SL_MIRROR_BRANCH)}"
+MIRROR="${MIRROR:-main}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -40,6 +44,12 @@ echo x > x.txt
 seq 1 100 > big.txt
 echo stage > stage.txt
 mkdir -p scripts && cp "$SW" scripts/session-wt.sh && chmod +x scripts/session-wt.sh
+# worktree 根改到本测试的临时目录：项目若把 SL_WT_ROOT 写成固定路径（不再保留
+# ${SL_WT_ROOT:-...} 覆盖写法），只传环境变量会失效
+if grep -q '^SL_WT_ROOT=' scripts/session-wt.sh; then
+    sed -i.bak 's|^SL_WT_ROOT=.*$|SL_WT_ROOT="'"$TMP"'"|' scripts/session-wt.sh
+    rm -f scripts/session-wt.sh.bak
+fi
 git_cfg add -A && git_cfg commit -qm base
 git_cfg push -q origin "$DEV" && git_cfg push -q origin "$DEV:$MIRROR"
 git_cfg worktree add -q "$TMP/wt-a" -b wt/a "$DEV"

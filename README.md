@@ -60,7 +60,7 @@
 |---|---|---|
 | `scripts/session-wt.sh`、`scripts/push-mine.sh`、`scripts/deploy-skeleton.sh`（改名 `deploy.sh`）、`scripts/deploy_watchdog.sh`、`scripts/install-git-hooks.sh` | `<项目根>/scripts/` | **硬编码**：push-mine/deploy 用 `$SCRIPT_DIR/..` 推仓库根（放深一层就推错）；deploy 的隔离重入硬编码 `scripts/` 路径；ci.yml 路径过滤正则 `^scripts/`；watchdog 由 deploy/session-wt 按 `$SCRIPT_DIR` 调用 |
 | `scripts/agent-guard.py`、`scripts/claude-settings.json` | guard → `<项目根>/scripts/agent-guard.py`；settings → `<项目根>/.claude/settings.json`（**提交进 git**） | 钩子命令用 `git rev-parse --show-toplevel` 定位 `<repo>/scripts/agent-guard.py`（换目录即失效）；项目已有 settings.json 时**只合并 `hooks.PreToolUse` 段**（该文件还承载 permissions/env，整体覆盖会丢配置）；不提交进 git → 各会话 worktree 里没有该文件，守卫在 worktree 会话中完全不生效（只在 hub 里改没用） |
-| `scripts/verify-install.sh`、`scripts/tests/test_agent_guard.sh`、`scripts/tests/test_conflicts.sh` | `<项目根>/scripts/`（测试放 `scripts/tests/`） | verify 用 `$0` 同目录找 session-wt/push-mine/deploy-skeleton，**必须与它们同级**；两套测试用 `$0/../..` 定位仓库根，改层级要同步改 `REPO_ROOT` |
+| `scripts/verify-install.sh`、`scripts/tests/test_agent_guard.sh`、`scripts/tests/test_conflicts.sh` | `<项目根>/scripts/`（测试放 `scripts/tests/`） | verify 用 `$0` 同目录找 session-wt/push-mine/deploy-skeleton，**必须与它们同级**；两套测试用 `$0/../..` 定位仓库根，改层级要同步改 `REPO_ROOT`；`test_conflicts` 自动读被测脚本的 `SL_DEV_BRANCH`/`SL_MIRROR_BRANCH`，项目改过参数也能跑 |
 | `hooks/pre-commit`、`hooks/pre-merge-commit`、`hooks/pre-push` | `<项目根>/scripts/hooks/`（三件齐全） | 安装器按 `scripts/hooks/<name>` 复制进 hooks 目录，缺任一件拒绝安装（预检） |
 | `ci.yml.template` | 填完占位符存为 `.github/workflows/ci.yml` | GitHub 只执行 `.github/workflows/*.yml`；**.template 原件不拷进项目**（留在模板仓当参考） |
 | `AGENTS-conventions.md` | 内容**并进**项目根 `AGENTS.md` / `CLAUDE.md`（占位符替换、放文件靠前） | 会话只自动读 AGENTS.md/CLAUDE.md 这类约定命名文件——散文件没人读 = 规约没装 |
@@ -106,7 +106,7 @@ SEVEN_LOCKS.md 坑 15）。
 | `hooks/pre-commit` + `install-git-hooks.sh` | L1 | 主 checkout 提交硬拦（hub 只作只读镜像）+ 与 pre-push 同批安装；保留本机既有钩子为 `.local` 链式调用 |
 | `ci.yml.template` | L4 | changes job 骨架 + concurrency + 门禁语义（执行 job 填空） |
 | `AGENTS-conventions.md` | 规约载体 | 并进新项目 AGENTS.md/CLAUDE.md 的约定节模板（散文件无人读） |
-| `tests/test_agent_guard.sh`、`tests/test_conflicts.sh` | 自检 | 编辑时拦截 54 例 / 冲突雷达 9 例行为回归（临时仓真跑，含 fail-open、暂存重命名、读取失败披露等边界）；项目分支非 kewang 时用 `SL_TEST_DEV` / `SL_TEST_MIRROR` 传入 |
+| `tests/test_agent_guard.sh`、`tests/test_conflicts.sh` | 自检 | 编辑时拦截 54 例 / 冲突雷达 9 例行为回归（临时仓真跑，含 fail-open、暂存重命名、读取失败披露等边界）；分支名自动读 `session-wt.sh` 的参数层（可用 `SL_TEST_DEV` / `SL_TEST_MIRROR` 覆盖） |
 | `scripts/verify-install.sh` | 自检 | 在临时裸仓真实驱动 L1/L3/L5 机制，输出 PASS/FAIL/SKIP（31 项本地可验 + 3 项需真实环境；`--drill` 可自动验单调前进闸）。本仓自身不挂 GitHub 托管 workflow（托管分钟受限）——建议在你自己的 CI 里跑它，见 `ci.yml.template` 末尾的三步推荐 |
 
 ## 让 agent 安装：提示词模板（复制给新项目的 AI 会话即可）
@@ -195,8 +195,8 @@ git diff --name-status v1.17 v1.18      # 换成「你的当前版本 → 目标
    ```bash
    ./scripts/install-git-hooks.sh --check    # 钩子未变=OK；有变更再安装
    bash scripts/verify-install.sh            # v1.18：31 PASS / 0 FAIL / 3 SKIP
-   bash scripts/tests/test_agent_guard.sh    # v1.18：54 PASS
-   SL_TEST_DEV=<开发分支> SL_TEST_MIRROR=<镜像分支> bash scripts/tests/test_conflicts.sh   # 9 PASS
+   bash scripts/tests/test_agent_guard.sh    # 54 PASS
+   bash scripts/tests/test_conflicts.sh      # 9 PASS（自动读参数层的分支名；可用 SL_TEST_DEV/SL_TEST_MIRROR 覆盖）
    ```
 5. **收尾**：guard 与 `.claude/settings.json` **提交进 git**（否则 worktree 会话没有该文件，
    守卫不生效）；老 `<SL_WT_ROOT>/wt-*` rebase 到新提交；CI 按 `ci.yml.template` 末尾注释补
@@ -264,6 +264,15 @@ git diff --name-status v1.17 v1.18      # 换成「你的当前版本 → 目标
       两处改动都还在**（命令只复制不删除）；随后可在 worktree 里 pathspec 提交
 
 ## 版本
+
+sevenlocks-v1.18.1（2026-10-26）：修两个「新项目一改参数层就误报」的校验缺陷——
+① `verify-install.sh` 的参数化从「按默认值字面量替换」改为**按键重写**：项目把
+`SL_DEV_BRANCH` / `SL_MIRROR_BRANCH` / 公告与历史路径改成自己的值后，不再报
+「参数化失败：找不到 'SL_DEV_BRANCH="kewang"'」；镜像分支在 `session-wt` 与
+`push-mine` 两处同步重写（否则 T12 假失败）。② `test_conflicts.sh` 自动读被测脚本的
+`SL_DEV_BRANCH`/`SL_MIRROR_BRANCH`，并把 `SL_WT_ROOT` 改写到测试临时目录（不再依赖
+参数层保留 `${SL_WT_ROOT:-…}` 的覆盖写法）。用「dev/prod + /srv 固定路径」的模拟项目
+实测：verify 31 / conflicts 9 / guard 54 全绿。
 
 sevenlocks-v1.18（2026-10-24 借力 Claude Code 并行机制）：①编辑时拦截
 `agent-guard.py` + `claude-settings.json`——hub 编辑/hub 提交/`--no-verify`/

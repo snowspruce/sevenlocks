@@ -1,5 +1,5 @@
 #!/bin/bash
-# sevenlocks-v1.18 · verify-install.sh —— 安装自检 / 模板回归
+# sevenlocks-v1.18.1 · verify-install.sh —— 安装自检 / 模板回归
 #
 # 做什么：在一个临时裸仓里真实驱动交付的脚本（session-wt / push-mine / deploy 骨架），
 # 逐项验证「通用层机制」，输出 PASS / FAIL / SKIP（SKIP=需真实 CI 或服务器，无法本地自证）。
@@ -74,42 +74,47 @@ chmod +x scripts/*.sh scripts/hooks/*
 # ⚠️ 每个替换都必须命中：源码与 verify 漂移时旧版是静默 no-op（P3，2026-10-22 实证
 # SL_COPY_FILES/SL_DIRTY_IGNORE 两处已失效却无人知），这里改为缺一即失败。
 python3 - "$TMP" <<'PYEOF'
+import re
 import sys
-tmp = sys.argv[1]
-def sub(path, pairs):
-    s = open(path).read()
-    for a, b in pairs:
-        if a not in s:
-            raise SystemExit("参数化失败：%s 中找不到 %r（模板与 verify 漂移）" % (path, a[:70]))
-        s = s.replace(a, b)
-    open(path, 'w').write(s)
 
-sub('scripts/session-wt.sh', [
-    ('SL_DEV_BRANCH="kewang"', 'SL_DEV_BRANCH="dev"'),
-    ('SL_MIRROR_BRANCH="main"', 'SL_MIRROR_BRANCH="main"'),
-    ('SL_NOTICE_FILE="/tmp/myproject-session-notice.txt"', 'SL_NOTICE_FILE="%s/notice.txt"' % tmp),
-    ('SL_WT_ROOT="${SL_WT_ROOT:-/tmp}"', 'SL_WT_ROOT="%s"' % tmp),
-    ('SL_WIRE_DIRS=("web/node_modules" "service/.venv")', 'SL_WIRE_DIRS=()'),
-    ('SL_COPY_FILES=("web/.env.local" "service/.env.local")', 'SL_COPY_FILES=()'),
-    (r"SL_DIRTY_IGNORE='^\?\? (web/)?node_modules(/|$)|^\?\? service/\.venv(/|$)|^\?\? web/\.env\.local$|^\?\? service/\.env\.local$'", "SL_DIRTY_IGNORE=''"),
-    ('SL_PRUNE_AGE_DAYS=3', 'SL_PRUNE_AGE_DAYS=0'),
-    ('SL_HISTORY_LOG="/tmp/myproject-deploy-history.log"', 'SL_HISTORY_LOG="%s/history.log"' % tmp),
-    ('SL_BACKUP_CHECK_TTL=3600', 'SL_BACKUP_CHECK_TTL=0'),
-    ('SL_BACKUP_CHECK_STAMP="${TMPDIR:-/tmp}/myproject-backup-check.stamp"', 'SL_BACKUP_CHECK_STAMP="%s/backup.stamp"' % tmp),
-])
-sub('scripts/push-mine.sh', [
-    ('SL_DEV_BRANCH="kewang"', 'SL_DEV_BRANCH="dev"'),
-])
-sub('scripts/deploy.sh', [
-    ('SL_DEV_BRANCH="kewang"', 'SL_DEV_BRANCH="dev"'),
-    ('SL_REPO_SLUG="owner/repo"', 'SL_REPO_SLUG="verify/verify"'),
-    ('SL_LOCK_DIR="/tmp/myproject-deploy.lock"', 'SL_LOCK_DIR="%s/deploy.lock"' % tmp),
-    ('SL_HISTORY_LOG="/tmp/myproject-deploy-history.log"', 'SL_HISTORY_LOG="%s/history.log"' % tmp),
-    ('SL_NOTICE_FILE="/tmp/myproject-session-notice.txt"', 'SL_NOTICE_FILE="%s/notice.txt"' % tmp),
-    ('SL_SERVER="user@host"', 'SL_SERVER="verify@127.0.0.1"'),
-    ('SL_SELF_RE="deploy-skeleton"', 'SL_SELF_RE="deploy.sh"'),
-])
-print("参数化完成（全部替换命中）")
+tmp = sys.argv[1]
+
+
+def set_line(path, key, new_line):
+    """把 `KEY=...` 整行重写为 new_line；键不存在即失败。
+
+    按**键**改而不是按「默认值字面量」改——项目改过参数层（分支名/公告路径等）后，
+    模板默认值已经不存在了，按字面量匹配会误报「模板与 verify 漂移」。
+    """
+    text = open(path).read()
+    pattern = re.compile(r"^%s=.*$" % re.escape(key), re.M)
+    if not pattern.search(text):
+        raise SystemExit("参数化失败：%s 中找不到 %s=（上游结构变了？）" % (path, key))
+    open(path, "w").write(pattern.sub(lambda _m: new_line, text, count=1))
+
+
+for target in ("scripts/session-wt.sh", "scripts/push-mine.sh", "scripts/deploy.sh"):
+    set_line(target, "SL_DEV_BRANCH", 'SL_DEV_BRANCH="dev"')
+# 镜像分支在 session-wt 与 push-mine 都有：两处都改，否则项目把镜像改名后 T12 会挂
+for target in ("scripts/session-wt.sh", "scripts/push-mine.sh"):
+    set_line(target, "SL_MIRROR_BRANCH", 'SL_MIRROR_BRANCH="main"')
+set_line("scripts/session-wt.sh", "SL_NOTICE_FILE", 'SL_NOTICE_FILE="%s/notice.txt"' % tmp)
+set_line("scripts/session-wt.sh", "SL_WT_ROOT", 'SL_WT_ROOT="%s"' % tmp)
+set_line("scripts/session-wt.sh", "SL_WIRE_DIRS", "SL_WIRE_DIRS=()")
+set_line("scripts/session-wt.sh", "SL_COPY_FILES", "SL_COPY_FILES=()")
+set_line("scripts/session-wt.sh", "SL_DIRTY_IGNORE", "SL_DIRTY_IGNORE=''")
+set_line("scripts/session-wt.sh", "SL_PRUNE_AGE_DAYS", "SL_PRUNE_AGE_DAYS=0")
+set_line("scripts/session-wt.sh", "SL_HISTORY_LOG", 'SL_HISTORY_LOG="%s/history.log"' % tmp)
+set_line("scripts/session-wt.sh", "SL_BACKUP_CHECK_TTL", "SL_BACKUP_CHECK_TTL=0")
+set_line("scripts/session-wt.sh", "SL_BACKUP_CHECK_STAMP", 'SL_BACKUP_CHECK_STAMP="%s/backup.stamp"' % tmp)
+
+set_line("scripts/deploy.sh", "SL_REPO_SLUG", 'SL_REPO_SLUG="verify/verify"')
+set_line("scripts/deploy.sh", "SL_LOCK_DIR", 'SL_LOCK_DIR="%s/deploy.lock"' % tmp)
+set_line("scripts/deploy.sh", "SL_HISTORY_LOG", 'SL_HISTORY_LOG="%s/history.log"' % tmp)
+set_line("scripts/deploy.sh", "SL_NOTICE_FILE", 'SL_NOTICE_FILE="%s/notice.txt"' % tmp)
+set_line("scripts/deploy.sh", "SL_SERVER", 'SL_SERVER="verify@127.0.0.1"')
+set_line("scripts/deploy.sh", "SL_SELF_RE", 'SL_SELF_RE="deploy.sh"')
+print("参数化完成（按键重写，跟随项目参数层）")
 PYEOF
 
 # 初始提交 + dev 分支推到裸仓

@@ -171,7 +171,7 @@ SEVEN_LOCKS.md 坑 15）。
    agent-guard（hub 编辑与整树 git 拒绝 + 接线 fail-open）/conflicts（交集与无交集）/
    adopt（含目录/跨仓/路径穿越/脏 push/交错 pid/过期备份）），
    输出 `PASS/FAIL/SKIP`；**全 PASS 后再按下方清单人工补 3 条需真实环境的项**
-   （CI 路径过滤、红 CI 硬拦、单调前进闸）。⚠️ verify 只证通用层机制，**不证**你的服务部署段、
+   （CI 路径过滤、红 CI 硬拦、单调前进闸）。verify 只证通用层机制，**不证**你的服务部署段、
    真实 CI job、服务器连通——那些必须真部署验。
 7. **治理**：通用层改 bug 回上游（上游项目或本包）再各项目同步；落地完成度对照
    SEVEN_LOCKS.md checklist 声明，缺层写明原因。
@@ -249,7 +249,7 @@ git diff --name-status v1.17 v1.18      # 换成「你的当前版本 → 目标
 
 - [ ] **内层哨兵**（v1.6）：在仓库根（非隔离树）执行 `DEPLOY_IN_WORKTREE=1 ./scripts/deploy.sh <目标>`
       → 应**立即拒绝**（哨兵缺失/nonce 不匹配）；正常 `./scripts/deploy.sh <目标>` 能进内层
-      （日志见「内层隔离重入」且不再报哨兵）。⚠️ 若看到「按旧外层过渡放行」，说明外层脚本
+      （日志见「内层隔离重入」且不再报哨兵）。若看到「按旧外层过渡放行」，说明外层脚本
       还是旧版——`git pull` 后该提示应消失
 - [ ] **部署历史留痕**：任一次部署后 `tail -2 <SL_HISTORY_LOG>`（默认
       `/tmp/<project>-deploy-history.log`）→ START/END 配对，END 含 `rc/dur/lock`，

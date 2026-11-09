@@ -10,6 +10,7 @@
 # pre-commit.local，本钩子放行时链式调用它（例如 macOS 元数据文件守卫）。
 #
 # 逃生舱：SL_ALLOW_HUB_COMMIT=1 git commit …（收口/rebase 等一次性场景）
+# hub-stale gate（2026-10-31 回灌）：逃生舱提交前也要检查主仓是否落后。
 # sevenlocks-managed
 set -uo pipefail
 
@@ -24,6 +25,22 @@ chain_local() {
 
 if [ "${SL_ALLOW_HUB_COMMIT:-0}" = "1" ]; then
     echo "pre-commit: ⚠️  SL_ALLOW_HUB_COMMIT=1，跳过 hub 守卫（自担风险）" >&2
+
+    # 逃生舱也要检查主仓是否落后：hub 落后 origin/main 110 个提交时连续在 hub 提交，
+    # 修复全进不了远端（下游项目 2026-10-31 事故）。
+    if [ "${SL_ALLOW_STALE_HUB:-0}" != "1" ]; then
+        _br=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+        if [ -n "$_br" ] && git rev-parse --verify -q "origin/$_br" >/dev/null 2>&1; then
+            _behind=$(git rev-list --count "HEAD..origin/$_br" 2>/dev/null || echo 0)
+            if [ "${_behind:-0}" -gt 0 ] 2>/dev/null; then
+                echo "pre-commit: ✗ 主仓落后 origin/$_br ${_behind} 个提交，拒绝在 hub 提交。" >&2
+                echo "            先 git fetch && git pull --rebase（或先收口本地分叉）。" >&2
+                echo "            确需带着落后提交继续：SL_ALLOW_HUB_COMMIT=1 SL_ALLOW_STALE_HUB=1 git commit …" >&2
+                exit 1
+            fi
+        fi
+    fi
+
     chain_local "$@"
     exit $?
 fi

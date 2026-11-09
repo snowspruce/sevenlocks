@@ -1,5 +1,5 @@
 #!/bin/bash
-# sevenlocks-v1.18 · session-wt.sh —— 会话 worktree 生命周期管理（L1 编辑层通用件）
+# sevenlocks-v1.18.2 · session-wt.sh —— 会话 worktree 生命周期管理（L1 编辑层通用件）
 # 上游真源：上游项目 scripts/session-wt.sh ——通用逻辑升级照 diff 同步到上游，勿在本副本魔改。
 #
 # 动机：并行 AI 会话共用主 checkout 的工作区/index 是多起事故的根源（同文件覆盖 /
@@ -167,6 +167,13 @@ cmd_start() {
                 echo "hub: 🚨 主仓落后 origin/${SL_DEV_BRANCH} ${_hb} 个提交（领先 ${_ha}）——本次未快进"
                 echo "hub: 🚨 **不要把主仓当检索/改动基底**：只在本 worktree（基于 origin/${SL_DEV_BRANCH}）里读和改"
                 echo "hub: 🚨 要让主仓跟上：先处理在制品/分叉，再 pull --rebase"
+                # 落后不再只是警告（下游项目 2026-10-31 事故回灌）：旧基线开工会让检索/
+                # 改动画在过期代码上，最终演变成"本地 28 / 远端 110"分叉。
+                if [ "${SL_ALLOW_STALE_BASE:-0}" != "1" ]; then
+                    echo "hub: ✗ 已中止：主仓落后时不开新会话（会基于过期代码）。"
+                    echo "hub:   确需以旧基线开工：SL_ALLOW_STALE_BASE=1 $0 start <name>"
+                    exit 1
+                fi
             else
                 echo "hub: 主仓未能 ff 快进（在制品挡路/主仓被占用）——跳过（本地无落后提交）"
             fi

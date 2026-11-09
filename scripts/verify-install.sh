@@ -1,5 +1,5 @@
 #!/bin/bash
-# sevenlocks-v1.18.1 · verify-install.sh —— 安装自检 / 模板回归
+# sevenlocks-v1.18.2 · verify-install.sh —— 安装自检 / 模板回归
 #
 # 做什么：在一个临时裸仓里真实驱动交付的脚本（session-wt / push-mine / deploy 骨架），
 # 逐项验证「通用层机制」，输出 PASS / FAIL / SKIP（SKIP=需真实 CI 或服务器，无法本地自证）。
@@ -54,12 +54,27 @@ git config user.name verify
 mkdir -p scripts scripts/hooks
 cp "$SRC/session-wt.sh" scripts/session-wt.sh
 cp "$SRC/push-mine.sh" scripts/push-mine.sh
-cp "$SRC/deploy-skeleton.sh" scripts/deploy.sh
+# 接线源二选一：模板仓是 deploy-skeleton.sh；溶解式项目已改名 deploy.sh
+# （下游项目 2026-11-09 实测：硬 cp deploy-skeleton 在溶解式项目落空，
+# set_line 找不到 scripts/deploy.sh → 全套 FAIL）
+if [ -f "$SRC/deploy-skeleton.sh" ]; then
+    cp "$SRC/deploy-skeleton.sh" scripts/deploy.sh
+else
+    cp "$SRC/deploy.sh" scripts/deploy.sh
+fi
 cp "$SRC/deploy_watchdog.sh" scripts/deploy_watchdog.sh
 cp "$SRC/install-git-hooks.sh" scripts/install-git-hooks.sh
 cp "$SRC/agent-guard.py" scripts/agent-guard.py
 mkdir -p .claude
-cp "$SRC/claude-settings.json" .claude/settings.json
+# 接线源二选一：模板仓有 scripts/claude-settings.json；溶解式项目只有已提交的
+# .claude/settings.json（按模板形态硬 cp 会在溶解式项目 FileNotFoundError，
+# 下游项目 2026-11-09 实测）
+mkdir -p .claude
+if [ -f "$SRC/claude-settings.json" ]; then
+    cp "$SRC/claude-settings.json" .claude/settings.json
+else
+    cp "$SRC/../.claude/settings.json" .claude/settings.json
+fi
 cp "$SRC/hooks/"* scripts/hooks/
 # 源文件可执行位检查（2026-10-22 审查 P1：watchdog 以 100644 提交，两处 [ -x ] 集成点
 # 全部失效，而被下面的 chmod 掩盖——必须查源头）

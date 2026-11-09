@@ -2,6 +2,18 @@
 
 按版本倒序。
 
+sevenlocks-v1.18.2（2026-11-09 下游项目实战回灌）：①`session-wt start` 的 hub 保鲜
+从「落后大声告警」升级为**硬中止**（`SL_ALLOW_STALE_BASE=1` 显式放行）——下游项目实测
+旧基线开工会让检索/改动画在过期代码上，演变成"本地 28 / 远端 110"分叉；FF 成功路径
+（含 verify T10 保鲜测试）不受影响。②`hooks/pre-commit` 的逃生舱同样加落后检查
+（`SL_ALLOW_HUB_COMMIT=1` 提交前仍查 `HEAD..origin/<branch>`，带
+`SL_ALLOW_STALE_HUB=1` 二次放行）——事故背景：hub 落后 110 提交时连续在 hub 提交，
+修复全进不了远端。③`verify-install.sh` 接线源支持溶解式回退：无
+`scripts/claude-settings.json` 时取 `$SRC/../.claude/settings.json`（原按模板形态硬 cp，
+溶解式项目必 FileNotFoundError，「L1 agent-guard 接线」假红）。④verify 的 deploy 接线源
+同样二选一：无 `scripts/deploy-skeleton.sh` 时取 `$SRC/deploy.sh`（溶解式项目文件已改名，
+原硬 cp 落空 → set_line 报 FileNotFoundError → 全套 FAIL）。
+
 sevenlocks-v1.18.1（2026-10-26）：修两个「新项目一改参数层就误报」的校验缺陷——
 ① `verify-install.sh` 的参数化从「按默认值字面量替换」改为**按键重写**：项目把
 `SL_DEV_BRANCH` / `SL_MIRROR_BRANCH` / 公告与历史路径改成自己的值后，不再报

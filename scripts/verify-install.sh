@@ -1,5 +1,5 @@
 #!/bin/bash
-# sevenlocks-v1.18.2 · verify-install.sh —— 安装自检 / 模板回归
+# sevenlocks-v1.19.2 · verify-install.sh —— 安装自检 / 模板回归
 #
 # 做什么：在一个临时裸仓里真实驱动交付的脚本（session-wt / push-mine / deploy 骨架），
 # 逐项验证「通用层机制」，输出 PASS / FAIL / SKIP（SKIP=需真实 CI 或服务器，无法本地自证）。
@@ -335,20 +335,22 @@ fi
 rm -f "$(git rev-parse --git-path hooks)/pre-commit.local"
 ./scripts/session-wt.sh clean s7 --force >/dev/null 2>&1
 
-# ── 14. gc-dirs：非 worktree 残留（无 .git）dry-run 不删 / --yes 删 / 注册树不动 ──
-mkdir -p "$TMP/wt-scratch" && echo junk > "$TMP/wt-scratch/junk.txt"
+# ── 14. gc-dirs：空壳判据（纯骨架清 / 含文件保留 / 有 .git 不动）+ dry-run 不删 ──
+mkdir -p "$TMP/wt-scratch" && echo junk > "$TMP/wt-scratch/junk.txt"   # 含文件=可能是在制品 → 必须保留
+mkdir -p "$TMP/wt-empty/skel/deep"                                   # 纯骨架（无普通文件）→ 可清
 mkdir -p "$TMP/wt-gitfile" && : > "$TMP/wt-gitfile/.git"   # 有 .git（哪怕是文件）= 非残留，必须保留
 ./scripts/session-wt.sh start s8 >/dev/null 2>&1
 ./scripts/session-wt.sh gc-dirs >"$TMP/t14a.log" 2>&1
-_dry_kept=0; [ -d "$TMP/wt-scratch" ] && _dry_kept=1
+_dry_kept=0; [ -d "$TMP/wt-empty" ] && _dry_kept=1
 ./scripts/session-wt.sh gc-dirs --yes >"$TMP/t14b.log" 2>&1
-if grep -q "wt-scratch" "$TMP/t14a.log" && [ "$_dry_kept" = "1" ] \
-   && [ ! -d "$TMP/wt-scratch" ] && [ -d "$TMP/wt-s8" ] && [ -d "$TMP/wt-gitfile" ]; then
-    pass "L1 gc-dirs（dry-run 不删 / --yes 删残留 / 注册树与带 .git 目录保留）"
+if grep -q "wt-empty" "$TMP/t14a.log" && [ "$_dry_kept" = "1" ] \
+   && [ ! -d "$TMP/wt-empty" ] && [ -d "$TMP/wt-scratch" ] && [ -f "$TMP/wt-scratch/junk.txt" ] \
+   && [ -d "$TMP/wt-s8" ] && [ -d "$TMP/wt-gitfile" ]; then
+    pass "L1 gc-dirs（纯骨架清 / 含文件保留 / dry-run 不删 / 注册树与带 .git 目录保留）"
 else
-    fail "L1 gc-dirs" "dry_kept=${_dry_kept} gitfile=$([ -d "$TMP/wt-gitfile" ] && echo kept || echo GONE)；$(tail -3 "$TMP/t14a.log")"
+    fail "L1 gc-dirs" "dry_kept=${_dry_kept} scratch=$([ -d "$TMP/wt-scratch" ] && echo kept || echo GONE) gitfile=$([ -d "$TMP/wt-gitfile" ] && echo kept || echo GONE)；$(tail -3 "$TMP/t14a.log")"
 fi
-rm -rf "$TMP/wt-gitfile"
+rm -rf "$TMP/wt-gitfile" "$TMP/wt-scratch"
 ./scripts/session-wt.sh clean s8 >/dev/null 2>&1
 
 # ── 15. replicate：backup 分支推远端 refs/backup/*（抗机器丢失 + 幂等）──────

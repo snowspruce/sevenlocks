@@ -1,5 +1,5 @@
 #!/bin/bash
-# sevenlocks-v1.19.0 · session-wt.sh —— 会话 worktree 生命周期管理（L1 编辑层通用件）
+# sevenlocks-v1.19.1 · session-wt.sh —— 会话 worktree 生命周期管理（L1 编辑层通用件）
 # 上游真源：上游项目 scripts/session-wt.sh ——通用逻辑升级照 diff 同步到上游，勿在本副本魔改。
 #
 # 动机：并行 AI 会话共用主 checkout 的工作区/index 是多起事故的根源（同文件覆盖 /
@@ -17,7 +17,7 @@
 #   ./scripts/session-wt.sh prune [--yes]           # 清理「已吸收+无活树+够老」的分支（默认 dry-run）
 #   ./scripts/session-wt.sh gc-dirs [--yes] [--unmanaged]
 #                                                  # 清理非 worktree 的临时残留目录（默认 dry-run）：
-#                                                  #  默认只清无 .git 的空壳；--unmanaged 追加「有 .git
+#                                                  #  默认只清「无 .git 且目录内无文件」的空壳；--unmanaged 追加「有 .git
 #                                                  #  但未注册 worktree」的目录（归属须=本仓 + clean +
 #                                                  #  无未推提交 + 够老；别的项目共用 WT_ROOT 一律跳过）
 #   ./scripts/session-wt.sh replicate               # backup/archive 分支推远端 refs/backup/*（抗机器丢失）
@@ -602,7 +602,9 @@ EOF
 
 # 清理非 worktree 的临时残留目录（2026-10-22；v1.19.0 拆两档）：
 #   默认档 —— /tmp 里手工复制/旧检出留下的 wt-* 空壳：没有 .git ⇒ git worktree prune 与
-#   分支回收都看不见（实测一次 17 个/115MB）；判据 = wt-* + 未注册 + 无 .git + mtime ≥ SL_PRUNE_AGE_DAYS。
+#   分支回收都看不见（实测一次 17 个/115MB）；判据 = wt-* + 未注册 + 无 .git + **目录内无
+#   普通文件** + mtime ≥ SL_PRUNE_AGE_DAYS。最后一条是 v1.19.1 补的：空壳无 .git 时归属
+#   不可判，含文件就可能是别的项目的在制品（多项目共用 WT_ROOT）。
 #   追加档 --unmanaged —— 有 .git 但未被本仓 worktree 注册的目录（audit 第三段报的就是它们）。
 #   这一类 git worktree list / worktree prune / 默认档全都看不见（实测本机 15 个里 10 个属于
 #   别的项目，所以**必须先判归属**，否则会删掉 design-engine / ai-photo 的活 worktree）。
@@ -635,14 +637,25 @@ cmd_gc_dirs() {
         age=$(( ( $(date +%s) - ts ) / 86400 ))
         [ "$age" -ge "$SL_PRUNE_AGE_DAYS" ] || continue
         kb=$(du -sk "$d" 2>/dev/null | awk '{print $1}' || true)
+        # 只清「纯骨架」（2026-11-26 审查 P1）：目录里存在普通文件 ⇒ 可能是在制品或别的
+        # 项目的未提交内容；空壳没有 .git、归属天然不可判，一律保留并提示人工确认。
+        _has_files=$(find "$d" -type f 2>/dev/null | sed -n '1p'; true)
+        if [ -n "$_has_files" ]; then
+            echo "保留: ${d}（${age}d，$(( ${kb:-0} / 1024 ))MB）—— 目录内有文件，可能是在制品；确认后手工 rm -rf"
+            continue
+        fi
         n=$((n + 1)); total_kb=$((total_kb + ${kb:-0}))
         list="${list}  ${d}（${age}d，$(( ${kb:-0} / 1024 ))MB）
 "
         if [ "$apply" = "--yes" ]; then
-            # TOCTOU 复核：检查与删除之间另一会话可能刚 start 出活 worktree。
-            # 删除前重测「无 .git 且仍够老」——两者任一变化即放弃该候选。
+            # TOCTOU 复核：检查与删除之间另一会话可能刚 start 出活 worktree 或写入文件。
+            # 删除前重测「无 .git / 仍无普通文件 / 仍够老」——任一变化即放弃该候选。
             if [ -e "$d/.git" ]; then
                 echo "跳过: ${d} 在检查后变成活 worktree"
+                continue
+            fi
+            if [ -n "$(find "$d" -type f 2>/dev/null | sed -n '1p'; true)" ]; then
+                echo "跳过: ${d} 在检查后出现文件"
                 continue
             fi
             _ts2=$(_mtime "$d")
@@ -717,6 +730,8 @@ cmd_gc_dirs() {
         if [ "$apply" = "--yes" ]; then
             printf "未纳管候选 %d 个（%dMB，均为本仓且 clean 无未推）：\n%s" "$n2" "$((total_kb2 / 1024))" "$list2"
             echo "已删除未纳管 ${del2} 个（释放约 $((total_kb2 / 1024))MB）"
+            # 收尾：删掉的是自有 .git 指针目录时，<common>/worktrees 下会留 prunable 条目
+            [ "$del2" -gt 0 ] && git -C "$MAIN_ROOT" worktree prune 2>/dev/null || true
         else
             printf "可清理未纳管 %d 个（%dMB，均为本仓且 clean 无未推）：\n%s" "$n2" "$((total_kb2 / 1024))" "$list2"
         fi

@@ -1,5 +1,5 @@
 #!/bin/bash
-# sevenlocks-v1.18.2 · session-wt.sh —— 会话 worktree 生命周期管理（L1 编辑层通用件）
+# sevenlocks-v1.19.0 · session-wt.sh —— 会话 worktree 生命周期管理（L1 编辑层通用件）
 # 上游真源：上游项目 scripts/session-wt.sh ——通用逻辑升级照 diff 同步到上游，勿在本副本魔改。
 #
 # 动机：并行 AI 会话共用主 checkout 的工作区/index 是多起事故的根源（同文件覆盖 /
@@ -15,9 +15,13 @@
 #                                                  #  worktree（主 checkout 不删；归属不明时的安全出口）
 #   ./scripts/session-wt.sh clean <name> [--force]  # 清理（有未推/脏改动拒绝；--force 强清）
 #   ./scripts/session-wt.sh prune [--yes]           # 清理「已吸收+无活树+够老」的分支（默认 dry-run）
-#   ./scripts/session-wt.sh gc-dirs [--yes]         # 清理非 worktree 的临时残留目录（无 .git；默认 dry-run）
+#   ./scripts/session-wt.sh gc-dirs [--yes] [--unmanaged]
+#                                                  # 清理非 worktree 的临时残留目录（默认 dry-run）：
+#                                                  #  默认只清无 .git 的空壳；--unmanaged 追加「有 .git
+#                                                  #  但未注册 worktree」的目录（归属须=本仓 + clean +
+#                                                  #  无未推提交 + 够老；别的项目共用 WT_ROOT 一律跳过）
 #   ./scripts/session-wt.sh replicate               # backup/archive 分支推远端 refs/backup/*（抗机器丢失）
-#   ./scripts/session-wt.sh audit                   # 只读体检：hub 脏/落后、残留目录、备份副本、中断部署
+#   ./scripts/session-wt.sh audit                   # 只读体检：hub 脏/落后、残留目录、未纳管目录、备份副本、中断部署
 #   ./scripts/session-wt.sh conflicts <name>          # 跨会话冲突雷达：我的改动集与其他会话/hub 求交集
 #
 # start 顺带：hub 保鲜（ff-only，带 HEAD 守卫）、>3 天 worktree 审计、孤儿分支安全回收
@@ -81,6 +85,34 @@ _realpath() { ( cd "$1" 2>/dev/null && pwd -P ) || printf '%s' "$1"; }
 # mtime 秒：GNU 优先（`stat -f` 在 GNU 上是文件系统报告，会污染算术），macOS 回退。
 _mtime() { stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null || echo 0; }
 
+# 目录归属（2026-11-26）。WT_ROOT 常被多项目共用：本机 /tmp 下同时躺着本仓、design-engine、
+# ai-photo 的会话树——不判归属就清理会删掉别的项目的活 worktree（实测 15 个 .git 目录里 10 个
+# 属于别的项目）。输出：
+#   own    = 本仓（.git 是目录且 origin 与本仓相同；或 .git 指针落在本仓 worktrees/ 下）
+#   other  = 别的项目（共用 WT_ROOT，一律跳过，绝不清理）
+#   broken = 有 .git 指针但目标不可解析/已失 → 内容不可判定，只报不删
+#   shell  = 无 .git（空壳档，归属天然无法判定）
+_wt_owner() {
+    local d="$1" gd="" url="" mine=""
+    if [ -d "$d/.git" ]; then
+        url=$(git -C "$d" config --get remote.origin.url 2>/dev/null || true)
+        mine=$(git -C "$MAIN_ROOT" config --get remote.origin.url 2>/dev/null || true)
+        if [ -n "$url" ] && [ -n "$mine" ] && [ "$url" = "$mine" ]; then echo own; else echo other; fi
+        return 0
+    fi
+    [ -e "$d/.git" ] || { echo shell; return 0; }
+    gd=$(sed -n 's/^gitdir: //p' "$d/.git" 2>/dev/null | head -1)
+    case "$gd" in
+        /*) case "$gd" in
+                "$_MAIN_COMMON"/worktrees/*)
+                    if [ -d "$gd" ]; then echo own; else echo broken; fi ;;
+                *) echo other ;;
+            esac ;;
+        *) echo broken ;;
+    esac
+    return 0
+}
+
 # 卫生体检（2026-10-22）：把「审计原本看不见的地方」纳入——hub 直编、非 git 临时目录、
 # 无远端副本的备份、被中断的部署。全部只读；清理分别走 prune / gc-dirs / replicate。
 _audit_hygiene() {
@@ -103,6 +135,37 @@ _audit_hygiene() {
     done
     if [ "$residue" -gt 0 ]; then
         echo "审计: ${residue} 个非 worktree 临时目录（$((residue_kb / 1024))MB）——session-wt gc-dirs 查看/清理"
+    fi
+    # 未纳管目录（2026-11-26）：有 .git 却没被本仓 worktree 注册。git worktree list、
+    # worktree prune 与上面那段（判据是「无 .git」）都看不见。**只报不清理**，并按归属分类：
+    #   own    = 本仓 → gc-dirs --unmanaged 可清（另需 clean + 无未推提交 + 够老）
+    #   other  = 别的项目（多项目共用 WT_ROOT 是常态）→ 跳过，绝不清理
+    #   broken = .git 指针失效 → 内容不可判定，只能人工确认
+    local own=0 own_kb=0 own_dirty=0 other=0 broken=0 cnt=""
+    for d in "$WT_ROOT"/wt-*; do
+        [ -d "$d" ] || continue
+        [ -e "$d/.git" ] || continue
+        printf '%s\n' "$reg" | grep -qxF -- "$(_realpath "$d")" && continue
+        case "$(_wt_owner "$d")" in
+            own)
+                own=$((own + 1))
+                kb=$(du -sk "$d" 2>/dev/null | awk '{print $1}' || true)
+                own_kb=$((own_kb + ${kb:-0}))
+                # 脏判定含未跟踪文件；git 读失败按「脏」计（不误报可清）
+                cnt=$(git -C "$d" status --porcelain 2>/dev/null | grep -c . || true)
+                [ "${cnt:-1}" -gt 0 ] && own_dirty=$((own_dirty + 1)) ;;
+            other) other=$((other + 1)) ;;
+            *) broken=$((broken + 1)) ;;
+        esac
+    done
+    if [ "$own" -gt 0 ]; then
+        echo "审计: ${own} 个未纳管的本仓目录（有 .git 但未注册 worktree，$((own_kb / 1024))MB，其中 ${own_dirty} 个有未提交改动）——session-wt gc-dirs --unmanaged 查看"
+    fi
+    if [ "$broken" -gt 0 ]; then
+        echo "审计: ${broken} 个目录的 .git 指针失效（内容不可判定，不自动清理）——人工确认后 rm -rf"
+    fi
+    if [ "$other" -gt 0 ]; then
+        echo "审计: 另有 ${other} 个 wt-* 目录属于其他项目（共用 WT_ROOT，已跳过）"
     fi
     # 备份远端副本：必须比 SHA（只比 ref 存在会把「远端是旧快照」误报成有备份）。
     # ls-remote 实测可达 12s，用 stamp 缓存 SL_BACKUP_CHECK_TTL 秒；失败不写 stamp（下轮重试）。
@@ -537,19 +600,32 @@ EOF
     fi
 }
 
-# 清理非 worktree 的临时残留目录（2026-10-22）：/tmp 里手工复制/旧检出留下的 wt-* 目录，
-# 没有 .git ⇒ git worktree prune 与分支回收都看不见（实测一次 17 个/115MB）。
-# 判据（全部满足才删）：目录名 wt-* + 未被任何 worktree 注册 + 无 .git + mtime ≥ SL_PRUNE_AGE_DAYS。
-# 默认 dry-run；--yes 执行。有 .git 的目录一律不碰（可能是注册异常，交给 worktree prune 排查）。
+# 清理非 worktree 的临时残留目录（2026-10-22；v1.19.0 拆两档）：
+#   默认档 —— /tmp 里手工复制/旧检出留下的 wt-* 空壳：没有 .git ⇒ git worktree prune 与
+#   分支回收都看不见（实测一次 17 个/115MB）；判据 = wt-* + 未注册 + 无 .git + mtime ≥ SL_PRUNE_AGE_DAYS。
+#   追加档 --unmanaged —— 有 .git 但未被本仓 worktree 注册的目录（audit 第三段报的就是它们）。
+#   这一类 git worktree list / worktree prune / 默认档全都看不见（实测本机 15 个里 10 个属于
+#   别的项目，所以**必须先判归属**，否则会删掉 design-engine / ai-photo 的活 worktree）。
+#   判据：wt-* + 未注册 + 归属=本仓 + clean（含未跟踪文件）+ 无任何未推提交
+#   （--all 对 --remotes 为空）+ mtime ≥ SL_PRUNE_AGE_DAYS；归属=别的项目一律跳过，指针失效只报不删。
+# 两档默认都是 dry-run，--yes 才执行；删除前对每项重测全部判据（TOCTOU）。
 cmd_gc_dirs() {
-    local apply="${1:-}"
+    local apply="" unmanaged=0 a
+    for a in "$@"; do
+        case "$a" in
+            --yes) apply="--yes" ;;
+            --unmanaged) unmanaged=1 ;;
+            '') : ;;
+            *) echo "ERROR: 未知参数 '$a'（用法：gc-dirs [--yes] [--unmanaged]）" >&2; return 1 ;;
+        esac
+    done
     case "$SL_PRUNE_AGE_DAYS" in
         ''|*[!0-9]*) echo "ERROR: SL_PRUNE_AGE_DAYS 必须是非负整数（当前 '${SL_PRUNE_AGE_DAYS}'）" >&2; return 1 ;;
     esac
     case "$WT_ROOT" in
         ''|/) echo "ERROR: SL_WT_ROOT 非法（'${WT_ROOT}'）——拒绝在根目录下扫描" >&2; return 1 ;;
     esac
-    local reg d ts age kb n=0 total_kb=0 del=0 failed=0 list=""
+    local reg d ts age kb n=0 total_kb=0 del=0 failed=0 list="" n2=0 total_kb2=0 del2=0 failed2=0 list2="" why=""
     reg=$(git -C "$MAIN_ROOT" worktree list --porcelain 2>/dev/null | sed -n 's|^worktree ||p' | while IFS= read -r w; do _realpath "$w"; done)
     for d in "$WT_ROOT"/wt-*; do
         [ -d "$d" ] || continue
@@ -577,17 +653,81 @@ cmd_gc_dirs() {
             if rm -rf "$d" 2>/dev/null; then del=$((del + 1)); else failed=$((failed + 1)); fi
         fi
     done
-    if [ "$n" -eq 0 ]; then
-        echo "OK: 无非 worktree 残留目录（判据：wt-* + 未注册 + 无 .git + ≥${SL_PRUNE_AGE_DAYS} 天）"
+    # ---- 追加档：未纳管目录（归属=本仓才可清） ----
+    if [ "$unmanaged" -eq 1 ]; then
+        for d in "$WT_ROOT"/wt-*; do
+            [ -d "$d" ] || continue
+            [ -e "$d/.git" ] || continue
+            printf '%s\n' "$reg" | grep -qxF -- "$(_realpath "$d")" && continue
+            case "$(_wt_owner "$d")" in
+                own) : ;;
+                other) continue ;;                    # 别的项目：共用 WT_ROOT，绝不碰
+                broken) echo "保留: ${d} —— .git 指针失效，内容不可判定（人工确认）"; continue ;;
+                *) continue ;;
+            esac
+            ts=$(_mtime "$d")
+            age=$(( ( $(date +%s) - ts ) / 86400 ))
+            [ "$age" -ge "$SL_PRUNE_AGE_DAYS" ] || continue
+            why=""
+            if ! git -C "$d" rev-parse --git-dir >/dev/null 2>&1; then
+                why="不是可读的 git 仓库"
+            elif [ -n "$(git -C "$d" status --porcelain 2>/dev/null || echo '?')" ]; then
+                why="有未提交改动（含未跟踪文件）"
+            elif ! _unpushed=$(git -C "$d" rev-list --count --all --not --remotes 2>/dev/null); then
+                why="无法读取提交图"
+            elif [ "${_unpushed:-1}" -ne 0 ]; then
+                why="${_unpushed} 个未推提交"
+            fi
+            kb=$(du -sk "$d" 2>/dev/null | awk '{print $1}' || true)
+            if [ -n "$why" ]; then
+                echo "保留: ${d}（${age}d，$(( ${kb:-0} / 1024 ))MB）—— ${why}"
+                continue
+            fi
+            n2=$((n2 + 1)); total_kb2=$((total_kb2 + ${kb:-0}))
+            list2="${list2}  ${d}（${age}d，$(( ${kb:-0} / 1024 ))MB）
+"
+            if [ "$apply" = "--yes" ]; then
+                # TOCTOU：重测归属 / clean / 未推 / 年龄，任一变化即放弃
+                if [ "$(_wt_owner "$d")" != own ] || [ -n "$(git -C "$d" status --porcelain 2>/dev/null || echo '?')" ]; then
+                    echo "跳过: ${d} 在检查后发生变化"; continue
+                fi
+                _u2=$(git -C "$d" rev-list --count --all --not --remotes 2>/dev/null || echo 1)
+                if [ "${_u2:-1}" -ne 0 ]; then echo "跳过: ${d} 在检查后出现未推提交"; continue; fi
+                _ts2=$(_mtime "$d")
+                if [ "$(( ( $(date +%s) - _ts2 ) / 86400 ))" -lt "$SL_PRUNE_AGE_DAYS" ]; then
+                    echo "跳过: ${d} 在检查后被写入（mtime 变新）"; continue
+                fi
+                if rm -rf "$d" 2>/dev/null; then del2=$((del2 + 1)); else failed2=$((failed2 + 1)); fi
+            fi
+        done
+    fi
+    if [ "$n" -eq 0 ] && [ "$n2" -eq 0 ]; then
+        echo "OK: 无残留目录（默认档判据：wt-* + 未注册 + 无 .git + ≥${SL_PRUNE_AGE_DAYS} 天$([ "$unmanaged" -eq 1 ] && echo "；未纳管档：本仓 + clean + 无未推")）"
         return 0
     fi
+    if [ "$n" -gt 0 ]; then
+        if [ "$apply" = "--yes" ]; then
+            printf "空壳候选 %d 个（%dMB）：\n%s" "$n" "$((total_kb / 1024))" "$list"
+            echo "已删除空壳 ${del} 个（释放约 $((total_kb / 1024))MB）"
+        else
+            printf "可清理空壳 %d 个（%dMB）：\n%s" "$n" "$((total_kb / 1024))" "$list"
+        fi
+    fi
+    if [ "$unmanaged" -eq 1 ] && [ "$n2" -gt 0 ]; then
+        if [ "$apply" = "--yes" ]; then
+            printf "未纳管候选 %d 个（%dMB，均为本仓且 clean 无未推）：\n%s" "$n2" "$((total_kb2 / 1024))" "$list2"
+            echo "已删除未纳管 ${del2} 个（释放约 $((total_kb2 / 1024))MB）"
+        else
+            printf "可清理未纳管 %d 个（%dMB，均为本仓且 clean 无未推）：\n%s" "$n2" "$((total_kb2 / 1024))" "$list2"
+        fi
+    fi
     if [ "$apply" = "--yes" ]; then
-        printf "候选 %d 个（%dMB）：\n%s" "$n" "$((total_kb / 1024))" "$list"
-        echo "已删除 ${del} 个（释放约 $((total_kb / 1024))MB）"
-        [ "$failed" -gt 0 ] && { echo "删除失败 ${failed} 个"; return 1; }
+        [ "$failed" -gt 0 ] && { echo "删除失败 ${failed} 个（空壳）"; return 1; }
+        [ "$failed2" -gt 0 ] && { echo "删除失败 ${failed2} 个（未纳管）"; return 1; }
     else
-        printf "可清理 %d 个目录（%dMB）：\n%s" "$n" "$((total_kb / 1024))" "$list"
-        echo "（dry-run）确认后执行：session-wt gc-dirs --yes"
+        local hint="session-wt gc-dirs --yes"
+        [ "$unmanaged" -eq 1 ] && hint="session-wt gc-dirs --yes --unmanaged"
+        echo "（dry-run）确认后执行：${hint}"
     fi
     return 0
 }
@@ -805,7 +945,8 @@ cmd_clean() {
 }
 
 usage() {
-    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+    # 打印头部注释块（第 2 行起至第一个非注释行）——不写死行号：新增命令/说明时不会静默截断
+    awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
 }
 
 case "${1:-}" in
@@ -815,7 +956,7 @@ case "${1:-}" in
     adopt) shift; [ $# -ge 1 ] || { usage; exit 1; }; cmd_adopt "$@" ;;
     clean) shift; [ $# -ge 1 ] || { usage; exit 1; }; cmd_clean "$@" ;;
     prune) shift; cmd_prune "${1:-}" ;;
-    gc-dirs) shift; cmd_gc_dirs "${1:-}" ;;
+    gc-dirs) shift; cmd_gc_dirs "$@" ;;
     replicate) cmd_replicate ;;
     audit) cmd_audit ;;
     conflicts) shift; [ $# -ge 1 ] || { usage; exit 1; }; cmd_conflicts "$@" ;;
